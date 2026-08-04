@@ -1,0 +1,7 @@
+torch
+torchvision
+kaggle
+pillow
+scikit-learn
+matplotlib
+tqdm

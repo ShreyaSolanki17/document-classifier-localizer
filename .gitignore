@@ -1,0 +1,10 @@
+data/
+runs/
+*.pt
+*.pth
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+.env
