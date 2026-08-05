@@ -5,3 +5,4 @@ pillow
 scikit-learn
 matplotlib
 ultralytics
+pytesseract
