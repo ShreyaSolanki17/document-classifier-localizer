@@ -4,3 +4,4 @@ kaggle
 pillow
 scikit-learn
 matplotlib
+ultralytics
