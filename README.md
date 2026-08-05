@@ -138,10 +138,33 @@ via the `TESSERACT_CMD` environment variable.
 Kaggle credentials for `build_dataset.py` go in `~/.kaggle/kaggle.json`
 (the Kaggle CLI's expected location — not inside this repo).
 
-## Status / what's next
+## Component 4: API
 
-Classifier, localizer, and extraction are all done and wired together
-end-to-end. Not yet built: a FastAPI endpoint tying the three components
-into one request/response service (sync only for v1 — Celery/Redis/async
-queues, multi-format ingestion beyond images, and auth are explicitly out
-of scope, future work only).
+One sync endpoint tying the pipeline together:
+
+```
+uvicorn src.api.app:app --reload
+curl -F "file=@path/to/doc.jpg" http://localhost:8000/classify
+```
+
+```json
+{
+  "document_type": "form",
+  "confidence": 0.7695,
+  "fields": []
+}
+```
+
+Sync only, single request at a time, no auth — see the "Status" section
+below for why. On genuine (non-synthetic-overlay) documents, `fields` is
+often empty: the localizer's real-vs-synthetic domain gap (see Component
+2) means it doesn't reliably fire on real headers/tables/signatures/logos
+it was never trained to recognize, only the synthetic shapes it was
+trained on.
+
+## Status
+
+All four components are done and wired together end-to-end: classifier →
+localizer → extraction → API. Explicitly out of scope for v1 (future work
+only): Celery/Redis/async task queues, multi-format ingestion beyond
+images, auth.
