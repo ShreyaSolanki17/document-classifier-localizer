@@ -4,4 +4,3 @@ kaggle
 pillow
 scikit-learn
 matplotlib
-tqdm
