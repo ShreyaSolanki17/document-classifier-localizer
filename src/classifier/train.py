@@ -26,12 +26,14 @@ Known limitations (see also README):
 """
 
 import json
+import random
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from sklearn.metrics import classification_report, confusion_matrix
 from torch import nn, optim
@@ -46,6 +48,12 @@ EPOCHS = 20
 LR = 1e-4
 PATIENCE = 5
 SEED = 42
+
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def build_model(num_classes):
@@ -74,8 +82,27 @@ def get_loaders():
     train_ds = datasets.ImageFolder(DATA_DIR / "train", transform=train_tf)
     val_ds = datasets.ImageFolder(DATA_DIR / "val", transform=val_tf)
     assert train_ds.classes == val_ds.classes
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+
+    # Generator and worker_init_fn ensure deterministic DataLoader shuffling and worker transform seeding.
+    g = torch.Generator()
+    g.manual_seed(SEED)
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=2,
+        worker_init_fn=seed_worker,
+        generator=g,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=2,
+        worker_init_fn=seed_worker,
+        generator=g,
+    )
     return train_loader, val_loader, train_ds.classes
 
 
@@ -146,7 +173,15 @@ def evaluate(model, val_loader, classes, device):
 
 
 def main():
+    # Set random seeds and CUDA/CuDNN deterministic flags for reproducible training runs.
+    random.seed(SEED)
+    np.random.seed(SEED)
     torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("device:", device)

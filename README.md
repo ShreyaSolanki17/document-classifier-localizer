@@ -26,7 +26,7 @@ letter, resume, memo — the original spec's "receipt/ID card/certificate"
 wording doesn't match RVL-CDIP's real 16 classes, so these were chosen
 instead: visually distinct layouts, all well-represented in the dataset).
 800 train / 200 val images per class. Adam, lr=1e-4, early-stopped at
-epoch 10 on val loss.
+epoch 10 on val loss. Training uses fixed seed (42) and deterministic CUDA/CuDNN/DataLoader configuration for reproducibility.
 
 **Result: 86.2% val accuracy.**
 
