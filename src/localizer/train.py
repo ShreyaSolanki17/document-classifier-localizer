@@ -13,17 +13,29 @@ Known limitations (see also src/localizer/build_synthetic_dataset.py):
   real accuracy drop on production scans without fine-tuning on real
   labeled examples.
 
-Run: python src/localizer/train.py
+Run: python src/localizer/train.py             (baseline, fixed-band dataset)
+Run: python src/localizer/train.py --dataset v2 (spatial-randomization experiment)
 """
 
+import argparse
 import csv
+import json
 from pathlib import Path
 
 import mlflow
 from ultralytics import YOLO
+from ultralytics import settings as yolo_settings
 
-DATA_YAML = Path(__file__).resolve().parents[2] / "data" / "localizer" / "data.yaml"
-OUT_DIR = Path(__file__).resolve().parents[2] / "runs"
+# Ultralytics has its own built-in MLflow auto-logging, which (a) would
+# create a second MLflow run for the same experiment (explicitly disallowed
+# by this project's tracking convention) and (b) calls
+# mlflow.set_tracking_uri() to its own file-store default, clobbering the
+# tracking URI this script already set and breaking our own later
+# mlflow.log_metrics() calls. We do our own logging below, so disable it.
+yolo_settings.update({"mlflow": False})
+
+ROOT = Path(__file__).resolve().parents[2]
+OUT_DIR = ROOT / "runs"
 EPOCHS = 50
 IMG_SIZE = 640
 PATIENCE = 10
@@ -42,10 +54,26 @@ N_TRAIN = 400
 N_VAL = 80
 CLASSES = ["header", "table", "signature", "logo"]
 
+# --dataset selects which generated dataset/output/run-name to use; training
+# config (epochs/imgsz/batch/optimizer/etc.) is identical across both so the
+# only variable in the spatial-randomization experiment is the data itself.
+DATASETS = {
+    "baseline": {
+        "data_yaml": ROOT / "data" / "localizer" / "data.yaml",
+        "run_name": "baseline-yolov8n",
+        "project_name": "localizer",
+    },
+    "v2": {
+        "data_yaml": ROOT / "data" / "localizer_v2" / "data.yaml",
+        "run_name": "localizer-spatial-randomization-v1",
+        "project_name": "localizer_v2",
+    },
+}
 
-def _log_params():
+
+def _log_params(dataset_key, data_yaml, output_dir):
     """Log all training and dataset parameters to the active MLflow run."""
-    mlflow.log_params({
+    params = {
         "model": "yolov8n",
         "task": "detection",
         "epochs": EPOCHS,
@@ -61,9 +89,20 @@ def _log_params():
         "n_val_images": N_VAL,
         "n_classes": len(CLASSES),
         "class_names": ",".join(CLASSES),
-        "dataset_config": str(DATA_YAML),
-        "output_dir": str(OUT_DIR / "localizer"),
-    })
+        "dataset_config": str(data_yaml),
+        "output_dir": str(output_dir),
+        "dataset_key": dataset_key,
+    }
+    # generation_config.json (written by build_synthetic_dataset.py) carries
+    # the actual placement/versioning config -- reuse it instead of
+    # duplicating those constants here.
+    gen_config_path = data_yaml.parent / "generation_config.json"
+    if gen_config_path.exists():
+        gen_config = json.loads(gen_config_path.read_text())
+        params["dataset_version"] = gen_config["dataset_version"]
+        params["spatial_randomization_version"] = gen_config["spatial_randomization_version"]
+        params["dataset_seed"] = gen_config["seed"]
+    mlflow.log_params(params)
 
 
 def _log_final_metrics(run_dir: Path):
@@ -140,18 +179,42 @@ def _log_artifacts(run_dir: Path):
             mlflow.log_artifact(str(p), artifact_path="plots")
 
 
+def _log_cross_eval(model, baseline_yaml):
+    """Evaluate the trained model on the original baseline val set too, so
+    the spatial-randomization experiment can be compared on both the
+    original benchmark and its own (harder) val set, without opening a
+    second MLflow run for the same experiment."""
+    metrics = model.val(data=str(baseline_yaml), split="val")
+    mlflow.log_metrics({
+        "val_baseline_dataset/precision": float(metrics.box.mp),
+        "val_baseline_dataset/recall":    float(metrics.box.mr),
+        "val_baseline_dataset/mAP50":     float(metrics.box.map50),
+        "val_baseline_dataset/mAP50-95":  float(metrics.box.map),
+    })
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", choices=sorted(DATASETS), default="baseline")
+    args = parser.parse_args()
+    cfg = DATASETS[args.dataset]
+    data_yaml = cfg["data_yaml"]
+    run_dir = OUT_DIR / cfg["project_name"]
+
+    # Pin the store explicitly (CWD-dependent default otherwise), so the
+    # experiment lands in the same place regardless of where this is run from.
+    mlflow.set_tracking_uri(f"sqlite:///{(ROOT / 'mlflow.db').as_posix()}")
     mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
-    with mlflow.start_run(run_name="baseline-yolov8n"):
-        _log_params()
+    with mlflow.start_run(run_name=cfg["run_name"]):
+        _log_params(args.dataset, data_yaml, run_dir)
 
         # ------------------------------------------------------------------ #
         # YOLO training — nothing below this line changes the training config #
         # ------------------------------------------------------------------ #
         model = YOLO("yolov8n.pt")
         model.train(
-            data=str(DATA_YAML),
+            data=str(data_yaml),
             epochs=EPOCHS,
             imgsz=IMG_SIZE,
             patience=PATIENCE,
@@ -164,14 +227,16 @@ def main():
             # (480 images) so the slowdown doesn't matter here.
             amp=False,
             project=str(OUT_DIR),
-            name="localizer",
+            name=cfg["project_name"],
             exist_ok=True,
         )
         # ------------------------------------------------------------------ #
 
-        run_dir = OUT_DIR / "localizer"
         _log_final_metrics(run_dir)
         _log_artifacts(run_dir)
+
+        if args.dataset == "v2":
+            _log_cross_eval(model, DATASETS["baseline"]["data_yaml"])
 
         run_id = mlflow.active_run().info.run_id
         print(f"\nMLflow run ID: {run_id}")
