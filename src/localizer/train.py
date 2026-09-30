@@ -15,6 +15,7 @@ Known limitations (see also src/localizer/build_synthetic_dataset.py):
 
 Run: python src/localizer/train.py             (baseline, fixed-band dataset)
 Run: python src/localizer/train.py --dataset v2 (spatial-randomization experiment)
+Run: python src/localizer/train.py --dataset v3 (+ realistic table content)
 """
 
 import argparse
@@ -68,6 +69,11 @@ DATASETS = {
         "run_name": "localizer-spatial-randomization-v1",
         "project_name": "localizer_v2",
     },
+    "v3": {
+        "data_yaml": ROOT / "data" / "localizer_v3" / "data.yaml",
+        "run_name": "localizer-table-content-v1",
+        "project_name": "localizer_v3",
+    },
 }
 
 
@@ -102,6 +108,11 @@ def _log_params(dataset_key, data_yaml, output_dir):
         params["dataset_version"] = gen_config["dataset_version"]
         params["spatial_randomization_version"] = gen_config["spatial_randomization_version"]
         params["dataset_seed"] = gen_config["seed"]
+        if "table_content_version" in gen_config:
+            params["table_content_version"] = gen_config["table_content_version"]
+            params["table_column_types"] = ",".join(gen_config["table_column_types"])
+            params["table_rows_range"] = str(gen_config["table_rows_range"])
+            params["table_cols_range"] = str(gen_config["table_cols_range"])
     mlflow.log_params(params)
 
 
@@ -138,7 +149,7 @@ def _log_final_metrics(run_dir: Path):
     })
 
 
-def _log_artifacts(run_dir: Path):
+def _log_artifacts(run_dir: Path, dataset_dir: Path):
     """Upload the YOLO-generated output files to the active MLflow run."""
     # Core model checkpoints.
     for ckpt in ["weights/best.pt", "weights/last.pt"]:
@@ -150,6 +161,12 @@ def _log_artifacts(run_dir: Path):
     csv_path = run_dir / "results.csv"
     if csv_path.exists():
         mlflow.log_artifact(str(csv_path))
+
+    # Dataset generation/validation metadata, if this dataset variant has them.
+    for name in ["generation_config.json", "validation_report.txt"]:
+        p = dataset_dir / name
+        if p.exists():
+            mlflow.log_artifact(str(p))
 
     # Standard YOLO plots (training curves, confusion matrix, PR curves, etc.).
     plot_patterns = [
@@ -233,9 +250,9 @@ def main():
         # ------------------------------------------------------------------ #
 
         _log_final_metrics(run_dir)
-        _log_artifacts(run_dir)
+        _log_artifacts(run_dir, data_yaml.parent)
 
-        if args.dataset == "v2":
+        if args.dataset != "baseline":
             _log_cross_eval(model, DATASETS["baseline"]["data_yaml"])
 
         run_id = mlflow.active_run().info.run_id

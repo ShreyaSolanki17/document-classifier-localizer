@@ -12,10 +12,28 @@ Run: python src/localizer/validate_dataset.py [--dataset-dir data/localizer_v2]
 
 import argparse
 import statistics
+import sys
 from collections import defaultdict
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from build_synthetic_dataset import CLASSES, N_TRAIN, N_VAL, RAW_DIR
+
+
+class _Tee:
+    """Mirror writes to multiple streams, so the report prints normally and
+    is also saved to a file for logging as an MLflow artifact."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE_DIR = ROOT / "data" / "localizer"
@@ -35,6 +53,7 @@ def _read_labels(dataset_dir, split):
         assert label_path.exists(), f"missing label for {img_path}"
         lines = label_path.read_text().splitlines()
         assert lines, f"empty label file {label_path}"
+        seen_classes = set()
         for line in lines:
             cls_id, xc, yc, bw, bh = line.split()
             cls_id = int(cls_id)
@@ -43,6 +62,10 @@ def _read_labels(dataset_dir, split):
             for v in (xc, yc, bw, bh):
                 assert 0.0 <= v <= 1.0, f"coord out of [0,1] in {label_path}: {line}"
             assert bw > 0 and bh > 0, f"zero/negative-area box in {label_path}: {line}"
+            # a duplicate class in one image would mean a stray extra box got
+            # labeled (e.g. table cell/text) instead of just the one field box
+            assert cls_id not in seen_classes, f"duplicate class {cls_id} in {label_path}"
+            seen_classes.add(cls_id)
             by_class[CLASSES[cls_id]].append((xc, yc, bw, bh))
 
     return images, by_class
@@ -101,20 +124,23 @@ def main():
     args = parser.parse_args()
     dataset_dir = Path(args.dataset_dir)
 
-    print("=== validating", dataset_dir, "===")
-    new_stats = validate(dataset_dir)
+    report_path = dataset_dir / "validation_report.txt"
+    with report_path.open("w") as report_file, redirect_stdout(_Tee(sys.stdout, report_file)):
+        print("=== validating", dataset_dir, "===")
+        new_stats = validate(dataset_dir)
 
-    if BASELINE_DIR.exists() and dataset_dir != BASELINE_DIR:
-        print("\n=== baseline (fixed-band) comparison:", BASELINE_DIR, "===")
-        base_stats = validate(BASELINE_DIR)
+        if BASELINE_DIR.exists() and dataset_dir != BASELINE_DIR:
+            print("\n=== baseline (fixed-band) comparison:", BASELINE_DIR, "===")
+            base_stats = validate(BASELINE_DIR)
 
-        print(f"\n{'class':<10} {'axis':<3} {'baseline stdev':>15} {'new stdev':>10}")
-        for cls in CLASSES:
-            for axis, idx in (("center_x", 0), ("center_y", 1)):
-                b = _stats([b[idx] for b in base_stats[cls]])["stdev"]
-                n = _stats([b[idx] for b in new_stats[cls]])["stdev"]
-                flag = "more varied" if n > b else "WARNING: not more varied"
-                print(f"{cls:<10} {axis:<3} {b:>15} {n:>10}   {flag}")
+            print(f"\n{'class':<10} {'axis':<3} {'baseline stdev':>15} {'new stdev':>10}")
+            for cls in CLASSES:
+                for axis, idx in (("center_x", 0), ("center_y", 1)):
+                    b = _stats([b[idx] for b in base_stats[cls]])["stdev"]
+                    n = _stats([b[idx] for b in new_stats[cls]])["stdev"]
+                    flag = "more varied" if n > b else "WARNING: not more varied"
+                    print(f"{cls:<10} {axis:<3} {b:>15} {n:>10}   {flag}")
+    print(f"\nvalidation report written to {report_path}")
 
 
 if __name__ == "__main__":

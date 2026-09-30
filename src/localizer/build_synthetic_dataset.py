@@ -15,8 +15,15 @@ rejection sampling (see _overlaps). Elements are still drawn shapes/text,
 not real headers/tables/signatures/logos -- a real-world model trained here
 would need fine-tuning on genuine labeled examples before production use.
 
-Writes to data/localizer_v2/ so the original fixed-band baseline dataset
-at data/localizer/ is left untouched.
+Table content (v3): cells are filled with synthetic invoice-like content
+(item names, quantities, prices, dates, percentages, reference IDs) instead
+of an empty grid, so the table's appearance is closer to a real document
+table. Only the TABLE class changed -- header/logo/signature generation is
+untouched, and the table's outer YOLO bounding box still represents the
+whole table (content is drawn strictly inside it, no extra boxes).
+
+Writes to data/localizer_v3/ so the Phase 2B dataset (data/localizer_v2/)
+and the original fixed-band baseline (data/localizer/) are left untouched.
 
 Run: python src/localizer/build_synthetic_dataset.py
 """
@@ -28,7 +35,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 RAW_DIR = Path(__file__).resolve().parents[2] / "data" / "raw"
-OUT_DIR = Path(__file__).resolve().parents[2] / "data" / "localizer_v2"
+OUT_DIR = Path(__file__).resolve().parents[2] / "data" / "localizer_v3"
 N_TRAIN = 400
 N_VAL = 80
 SEED = 42
@@ -36,8 +43,9 @@ SEED = 42
 CLASSES = ["header", "table", "signature", "logo"]
 FONT_PATH = "C:/Windows/Fonts/arial.ttf"
 
-DATASET_VERSION = "v2-spatial-random"
+DATASET_VERSION = "v3-table-content"
 SPATIAL_RANDOMIZATION_VERSION = "v1"
+TABLE_CONTENT_VERSION = "v1"
 MAX_PLACEMENT_TRIES = 15
 OVERLAP_THRESHOLD = 0.05  # max fraction of a new box's area allowed to overlap already-placed boxes
 
@@ -69,6 +77,46 @@ HEADER_TEXTS = [
     "MONTHLY REPORT", "APPLICATION FORM", "RE: Account Statement",
     "PURCHASE ORDER #{}", "CURRICULUM VITAE", "STATEMENT OF WORK",
 ]
+
+# Each table column is assigned one content type (so a column reads as
+# consistently numeric or textual, like a real table) instead of every cell
+# being independently random.
+TABLE_ITEM_NAMES = [
+    "Widget", "Gadget", "Consulting Fee", "License", "Shipping",
+    "Materials", "Labor", "Component", "Assembly Kit", "Service Charge",
+    "Maintenance", "Subscription", "Hardware Unit", "Software Seat",
+]
+TABLE_COLUMN_TYPES = ["item", "qty", "price", "date", "percent", "id"]
+TABLE_HEADER_LABELS = {
+    "item": "Item", "qty": "Qty", "price": "Price",
+    "date": "Date", "percent": "Rate", "id": "Ref #",
+}
+TABLE_NUMERIC_COLUMN_TYPES = {"qty", "price", "percent", "id"}
+
+
+def _table_cell_text(col_type):
+    if col_type == "item":
+        return random.choice(TABLE_ITEM_NAMES)
+    if col_type == "qty":
+        return str(random.randint(1, 500))
+    if col_type == "price":
+        return f"${random.randint(1, 9999)}.{random.randint(0, 99):02d}"
+    if col_type == "date":
+        return f"{random.randint(1, 12):02d}/{random.randint(1, 28):02d}/{random.randint(20, 26)}"
+    if col_type == "percent":
+        return f"{random.randint(0, 100)}%"
+    return "#" + "".join(random.choices("0123456789", k=random.randint(4, 6)))  # id
+
+
+def _fit_font(draw, text, max_width, start_size, min_size=8):
+    """Shrink font size until `text` fits max_width, so cell content never
+    overflows its column (and therefore never overflows the table box)."""
+    size = start_size
+    f = font(size)
+    while size > min_size and draw.textlength(text, font=f) > max_width:
+        size -= 1
+        f = font(size)
+    return f
 
 
 def font(size):
@@ -155,9 +203,26 @@ def draw_table(draw, w, h, placed):
     for i in range(1, rows):
         y = y0 + i * row_h
         draw.line([(x0, y), (x1, y)], fill="black", width=1)
-    for j in range(1, cols):
-        x = x0 + j * (x1 - x0) // cols
+    col_edges = [x0 + j * (x1 - x0) // cols for j in range(cols + 1)]
+    for x in col_edges[1:-1]:
         draw.line([(x, y0), (x, y1)], fill="black", width=1)
+
+    # Cell content -- drawn strictly inside the grid computed above, so the
+    # table's outer YOLO box (still just `box`) is unaffected.
+    col_types = [random.choice(TABLE_COLUMN_TYPES) for _ in range(cols)]
+    header_row = random.random() < 0.6
+    pad = 4
+    for i in range(rows):
+        for j in range(cols):
+            cx0, cx1 = col_edges[j], col_edges[j + 1]
+            cy0 = y0 + i * row_h
+            text = TABLE_HEADER_LABELS[col_types[j]] if (header_row and i == 0) else _table_cell_text(col_types[j])
+            f = _fit_font(draw, text, max(1, cx1 - cx0 - 2 * pad), max(9, int(row_h * 0.45)))
+            tl, tt, tr, tb = draw.textbbox((0, 0), text, font=f)
+            tw, th = tr - tl, tb - tt
+            tx = cx1 - pad - tw if col_types[j] in TABLE_NUMERIC_COLUMN_TYPES else cx0 + pad
+            ty = cy0 + (row_h - th) / 2 - tt
+            draw.text((tx, ty), text, fill="black", font=f)
     return "table", box
 
 
@@ -230,6 +295,7 @@ def write_generation_config():
     config = {
         "dataset_version": DATASET_VERSION,
         "spatial_randomization_version": SPATIAL_RANDOMIZATION_VERSION,
+        "table_content_version": TABLE_CONTENT_VERSION,
         "seed": SEED,
         "n_train": N_TRAIN,
         "n_val": N_VAL,
@@ -237,6 +303,9 @@ def write_generation_config():
         "placement_zones": PLACEMENT_ZONES,
         "max_placement_tries": MAX_PLACEMENT_TRIES,
         "overlap_threshold": OVERLAP_THRESHOLD,
+        "table_column_types": TABLE_COLUMN_TYPES,
+        "table_rows_range": [3, 6],
+        "table_cols_range": [2, 4],
     }
     (OUT_DIR / "generation_config.json").write_text(json.dumps(config, indent=2))
 

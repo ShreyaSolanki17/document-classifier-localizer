@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from build_synthetic_dataset import CLASSES, make_sample
+from build_synthetic_dataset import CLASSES, TABLE_COLUMN_TYPES, _table_cell_text, make_sample
 
 
 def _fresh_bg(tmp):
@@ -76,8 +76,41 @@ def test_placements_vary_across_images():
         shutil.rmtree(tmp)
 
 
+def test_table_content_is_deterministic():
+    random.seed(7)
+    seq1 = [_table_cell_text(random.choice(TABLE_COLUMN_TYPES)) for _ in range(30)]
+    random.seed(7)
+    seq2 = [_table_cell_text(random.choice(TABLE_COLUMN_TYPES)) for _ in range(30)]
+    assert seq1 == seq2
+
+
+def test_table_content_varies():
+    random.seed(0)
+    texts = {_table_cell_text(random.choice(TABLE_COLUMN_TYPES)) for _ in range(40)}
+    assert len(texts) > 10, texts
+
+
+def test_no_extra_labels_for_table_cells():
+    # cell content is drawn, not labeled -- each image must still have at
+    # most one label per class (never one per cell/row).
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        bg_path = _fresh_bg(tmp)
+        for i in range(10):
+            img_path, label_path = tmp / f"n{i}.jpg", tmp / f"n{i}.txt"
+            make_sample(bg_path, img_path, label_path)
+            lines = label_path.read_text().splitlines()
+            cls_ids = [line.split()[0] for line in lines]
+            assert len(cls_ids) == len(set(cls_ids)), lines  # no duplicate class per image
+    finally:
+        shutil.rmtree(tmp)
+
+
 if __name__ == "__main__":
     test_bboxes_in_range_and_count_matches()
     test_same_seed_is_deterministic()
     test_placements_vary_across_images()
+    test_table_content_is_deterministic()
+    test_table_content_varies()
+    test_no_extra_labels_for_table_cells()
     print("ok")
